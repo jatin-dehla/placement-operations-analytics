@@ -1,0 +1,39 @@
+# ==============================================================================
+# Approved Scale Assumptions & Configuration Parameters
+# Entities: candidates, companies, applications, recruitment_stages,
+#           interview_slots, rooms, panels
+# ==============================================================================
+
+scale_targets:
+  candidates_min: 1000
+  candidates_max: 1500
+  companies_min: 150
+  companies_max: 300
+  applications_min: 4000
+  applications_max: 8000
+  stage_records_min: 20000
+  stage_records_max: 60000
+
+generation:
+  random_seed: 42
+  start_date: "2026-01-01"
+  end_date: "2026-06-30"
+
+recruitment_stages:
+  - Sourcing
+  - Resume Screening
+  - Online Assessment
+  - Technical Interview 1
+  - Technical Interview 2
+  - HR Interview
+  - Offer Extended
+  - Joined
+
+sla_thresholds_hours:
+  sourcing: 24
+  resume_screening: 48
+  online_assessment: 72
+  technical_interview_1: 48
+  technical_interview_2: 48
+  hr_interview: 24
+  offer_extended: 72

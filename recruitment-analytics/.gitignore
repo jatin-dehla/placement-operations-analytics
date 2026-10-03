@@ -1,0 +1,126 @@
+# ==============================================================================
+# Recruitment Funnel & Capacity Analytics Platform - .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Python
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.noserc
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# ------------------------------------------------------------------------------
+# PostgreSQL & Database
+# ------------------------------------------------------------------------------
+*.dump
+*.sql.bak
+*.pgdump
+*.log
+pg_data/
+*.db
+*.sqlite3
+
+# ------------------------------------------------------------------------------
+# Power BI & Dashboard Tools
+# ------------------------------------------------------------------------------
+*.pbix.lock
+*.pbit.tmp
+*.abf
+*.temp
+Dashboard_AutoSave*
+AutoRecovery/
+*.pbi
+
+# ------------------------------------------------------------------------------
+# Data Files & Outputs (Preserve structure via .gitkeep)
+# ------------------------------------------------------------------------------
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+outputs/*
+!outputs/.gitkeep
+*.csv
+*.parquet
+*.xlsx
+*.feather
+
+# ------------------------------------------------------------------------------
+# IDEs & Code Editors
+# ------------------------------------------------------------------------------
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# PyCharm / IntelliJ
+.idea/
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# ------------------------------------------------------------------------------
+# Environment Variables & Secrets
+# ------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+secrets.yaml
+config/credentials.json
+*.pem
+*.key
+
+# ------------------------------------------------------------------------------
+# Operating System Files
+# ------------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
