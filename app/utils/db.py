@@ -56,22 +56,44 @@ def get_duckdb_connection():
     return conn
 
 
+def get_warehouse_mtime() -> float:
+    """Return the last modified timestamp of the DuckDB warehouse file for cache invalidation."""
+    try:
+        db_path = get_warehouse_path()
+        return os.path.getmtime(db_path)
+    except Exception:
+        return 0.0
+
+
+def clear_warehouse_cache():
+    """Explicitly invalidate all cached query and connection resources."""
+    st.cache_data.clear()
+    st.cache_resource.clear()
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def run_query(query_sql: str, params: Optional[List[Any]] = None) -> pd.DataFrame:
-    """
-    Execute an analytical SQL query against DuckDB and return a Pandas DataFrame.
-    Results are cached for 5 minutes.
-    """
+def _run_query_cached(query_sql: str, params_tuple: Optional[tuple], db_mtime: float) -> pd.DataFrame:
+    """Execute cached analytical SQL query against DuckDB."""
     conn = get_duckdb_connection()
     try:
-        if params:
-            df = conn.execute(query_sql, params).df()
+        if params_tuple:
+            df = conn.execute(query_sql, list(params_tuple)).df()
         else:
             df = conn.execute(query_sql).df()
         return df
     except Exception as e:
         st.error(f"DuckDB Query Error: {e}")
         return pd.DataFrame()
+
+
+def run_query(query_sql: str, params: Optional[List[Any]] = None) -> pd.DataFrame:
+    """
+    Execute an analytical SQL query against DuckDB and return a Pandas DataFrame.
+    Automatically invalidates cache whenever the warehouse file is modified.
+    """
+    db_mtime = get_warehouse_mtime()
+    params_tuple = tuple(params) if params else None
+    return _run_query_cached(query_sql, params_tuple, db_mtime)
 
 
 def check_warehouse_health() -> dict:

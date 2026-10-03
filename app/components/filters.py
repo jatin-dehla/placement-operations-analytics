@@ -178,6 +178,11 @@ def render_sidebar_filters() -> Dict[str, Any]:
     if active_filters_count > 0:
         st.sidebar.caption(f"⚡ {active_filters_count} active filter(s) applied")
 
+    if st.sidebar.button("🔄 Refresh Data / Clear Cache", use_container_width=True, help="Force reload data directly from DuckDB analytics warehouse."):
+        from utils.db import clear_warehouse_cache
+        clear_warehouse_cache()
+        st.rerun()
+
     return {
         "company_ids": selected_company_ids if selected_company_ids else None,
         "sectors": selected_sectors if selected_sectors else None,

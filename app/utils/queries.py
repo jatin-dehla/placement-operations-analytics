@@ -31,11 +31,11 @@ def _build_where_clause(
         conditions.append(f"{table_alias}.company_id IN ({ids_str})")
 
     if sectors:
-        sec_str = ", ".join(f"'{s.replace("'", "''")}'" for s in sectors)
+        sec_str = ", ".join("'" + s.replace("'", "''") + "'" for s in sectors)
         conditions.append(f"c.industry_sector IN ({sec_str})")
 
     if stages:
-        stg_str = ", ".join(f"'{s.replace("'", "''")}'" for s in stages)
+        stg_str = ", ".join("'" + s.replace("'", "''") + "'" for s in stages)
         conditions.append(f"sr.stage_name IN ({stg_str})")
 
     if date_range and len(date_range) == 2 and date_range[0] and date_range[1]:
@@ -78,11 +78,18 @@ def get_executive_kpis(filters: Optional[Dict[str, Any]] = None) -> Dict[str, An
 
     where_clause = _build_where_clause(company_ids=company_ids, sectors=sectors, date_range=date_range, table_alias="a")
 
+    if where_clause:
+        cand_count_expr = "COUNT(DISTINCT a.candidate_id)"
+        comp_count_expr = "COUNT(DISTINCT a.company_id)"
+    else:
+        cand_count_expr = "(SELECT COUNT(DISTINCT candidate_id) FROM candidates)"
+        comp_count_expr = "(SELECT COUNT(DISTINCT company_id) FROM companies)"
+
     sql = f"""
     SELECT 
         COUNT(DISTINCT a.application_id) AS total_applications,
-        COUNT(DISTINCT a.candidate_id) AS total_candidates,
-        COUNT(DISTINCT a.company_id) AS total_companies,
+        {cand_count_expr} AS total_candidates,
+        {comp_count_expr} AS total_companies,
         COUNT(DISTINCT CASE WHEN a.overall_status = 'Hired' THEN a.application_id END) AS total_hires,
         COUNT(DISTINCT CASE WHEN a.overall_status = 'Active' THEN a.application_id END) AS total_active,
         ROUND(
@@ -96,7 +103,19 @@ def get_executive_kpis(filters: Optional[Dict[str, Any]] = None) -> Dict[str, An
     df = run_query(sql)
 
     # Slots count from interview_slots
-    slots_sql = "SELECT COUNT(*) AS total_slots FROM interview_slots;"
+    if company_ids:
+        ids_str = ", ".join(f"'{cid}'" if isinstance(cid, str) else str(cid) for cid in company_ids)
+        slots_sql = f"SELECT COUNT(*) AS total_slots FROM interview_slots WHERE company_id IN ({ids_str});"
+    elif sectors:
+        sec_str = ", ".join("'" + s.replace("'", "''") + "'" for s in sectors)
+        slots_sql = f"""
+        SELECT COUNT(s.slot_id) AS total_slots 
+        FROM interview_slots s 
+        JOIN companies c ON s.company_id = c.company_id 
+        WHERE c.industry_sector IN ({sec_str});
+        """
+    else:
+        slots_sql = "SELECT COUNT(*) AS total_slots FROM interview_slots;"
     slots_df = run_query(slots_sql)
     total_slots = slots_df["total_slots"].iloc[0] if not slots_df.empty else 0
 
@@ -139,14 +158,65 @@ def get_outcome_distribution(filters: Optional[Dict[str, Any]] = None) -> pd.Dat
 
 def get_candidates_by_degree(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
     """Distribution of candidates by academic degree program and major."""
-    sql = """
+    filters = filters or {}
+    company_ids = filters.get("company_ids")
+    sectors = filters.get("sectors")
+    date_range = filters.get("date_range")
+
+    if company_ids or sectors or date_range:
+        where_clause = _build_where_clause(company_ids=company_ids, sectors=sectors, date_range=date_range, table_alias="a")
+        sql = f"""
+        SELECT 
+            cand.degree_program,
+            COUNT(DISTINCT cand.candidate_id) AS candidate_count,
+            ROUND(AVG(cand.gpa)::NUMERIC, 2) AS avg_gpa
+        FROM candidates cand
+        JOIN applications a ON cand.candidate_id = a.candidate_id
+        JOIN companies c ON a.company_id = c.company_id
+        {where_clause}
+        GROUP BY cand.degree_program
+        ORDER BY candidate_count DESC;
+        """
+    else:
+        sql = """
+        SELECT 
+            degree_program,
+            COUNT(candidate_id) AS candidate_count,
+            ROUND(AVG(gpa)::NUMERIC, 2) AS avg_gpa
+        FROM candidates
+        GROUP BY degree_program
+        ORDER BY candidate_count DESC;
+        """
+    return run_query(sql)
+
+
+def get_interview_capacity_by_company(filters: Optional[Dict[str, Any]] = None, limit: int = 10) -> pd.DataFrame:
+    """Interview slot allocation and capacity by corporate partner."""
+    filters = filters or {}
+    company_ids = filters.get("company_ids")
+    sectors = filters.get("sectors")
+
+    conditions = []
+    if company_ids:
+        ids_str = ", ".join(f"'{cid}'" if isinstance(cid, str) else str(cid) for cid in company_ids)
+        conditions.append(f"s.company_id IN ({ids_str})")
+    if sectors:
+        sec_str = ", ".join("'" + s.replace("'", "''") + "'" for s in sectors)
+        conditions.append(f"c.industry_sector IN ({sec_str})")
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    sql = f"""
     SELECT 
-        degree_program,
-        COUNT(candidate_id) AS candidate_count,
-        ROUND(AVG(gpa)::NUMERIC, 2) AS avg_gpa
-    FROM candidates
-    GROUP BY degree_program
-    ORDER BY candidate_count DESC;
+        c.company_name,
+        c.industry_sector,
+        COUNT(s.slot_id) AS total_slots
+    FROM interview_slots s
+    JOIN companies c ON s.company_id = c.company_id
+    {where_clause}
+    GROUP BY c.company_name, c.industry_sector
+    ORDER BY total_slots DESC
+    LIMIT {limit};
     """
     return run_query(sql)
 
@@ -695,5 +765,267 @@ def get_capacity_recommendations() -> pd.DataFrame:
     UNION ALL
     SELECT * FROM room_status
     ORDER BY severity ASC, load_pct DESC;
+    """
+    return run_query(sql)
+
+
+# ==============================================================================
+# Additional Analytical Queries Aligned with Power BI Model
+# ==============================================================================
+
+def get_transition_dropoffs(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    """
+    Sequential stage-to-stage candidate transition drop-offs.
+    Powers 'Stage Drop-offs' and 'Share of Total Candidate Loss' visuals.
+    """
+    filters = filters or {}
+    where_clause = _build_where_clause(
+        company_ids=filters.get("company_ids"),
+        sectors=filters.get("sectors"),
+        date_range=filters.get("date_range"),
+        table_alias="a"
+    )
+
+    sql = f"""
+    WITH stage_counts AS (
+        SELECT 
+            sr.sequence_order, 
+            sr.stage_name, 
+            COUNT(DISTINCT sr.application_id) AS app_count
+        FROM recruitment_stage_records sr
+        JOIN applications a ON sr.application_id = a.application_id
+        JOIN companies c ON a.company_id = c.company_id
+        {where_clause}
+        GROUP BY sr.sequence_order, sr.stage_name
+        ORDER BY sr.sequence_order
+    ),
+    with_prev AS (
+        SELECT 
+            sequence_order,
+            stage_name,
+            app_count,
+            LAG(stage_name) OVER (ORDER BY sequence_order) AS prev_stage,
+            LAG(app_count) OVER (ORDER BY sequence_order) AS prev_count
+        FROM stage_counts
+    )
+    SELECT 
+        prev_stage || ' -> ' || stage_name AS transition,
+        (prev_count - app_count) AS dropoff_count,
+        ROUND(((prev_count - app_count)::NUMERIC / NULLIF(prev_count, 0)) * 100, 1) AS dropoff_rate_pct,
+        ROUND(((prev_count - app_count)::NUMERIC / NULLIF(SUM(prev_count - app_count) OVER(), 0)) * 100, 1) AS share_of_total_loss_pct
+    FROM with_prev
+    WHERE prev_stage IS NOT NULL AND (prev_count - app_count) > 0
+    ORDER BY sequence_order;
+    """
+    return run_query(sql)
+
+
+def get_stage_conversion_table(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    """
+    Complete stage-by-stage candidate progression and conversion summary table.
+    Powers the 'Stage Conversion' matrix on Page 2.
+    """
+    filters = filters or {}
+    where_clause = _build_where_clause(
+        company_ids=filters.get("company_ids"),
+        sectors=filters.get("sectors"),
+        date_range=filters.get("date_range"),
+        table_alias="a"
+    )
+
+    sql = f"""
+    WITH stage_counts AS (
+        SELECT 
+            sr.sequence_order, 
+            sr.stage_name, 
+            COUNT(DISTINCT sr.application_id) AS candidates_reaching_stage
+        FROM recruitment_stage_records sr
+        JOIN applications a ON sr.application_id = a.application_id
+        JOIN companies c ON a.company_id = c.company_id
+        {where_clause}
+        GROUP BY sr.sequence_order, sr.stage_name
+        ORDER BY sr.sequence_order
+    ),
+    with_prev AS (
+        SELECT 
+            sequence_order,
+            stage_name,
+            candidates_reaching_stage,
+            LAG(candidates_reaching_stage) OVER (ORDER BY sequence_order) AS prev_count,
+            FIRST_VALUE(candidates_reaching_stage) OVER (ORDER BY sequence_order) AS initial_count
+        FROM stage_counts
+    )
+    SELECT 
+        stage_name AS "Stage",
+        candidates_reaching_stage AS "Candidates Reaching Stage",
+        ROUND((candidates_reaching_stage::NUMERIC / NULLIF(COALESCE(prev_count, candidates_reaching_stage), 0)) * 100, 1) || '%' AS "Step Conversion %",
+        ROUND((candidates_reaching_stage::NUMERIC / NULLIF(initial_count, 0)) * 100, 1) || '%' AS "Overall Conversion %"
+    FROM with_prev
+    ORDER BY sequence_order;
+    """
+    return run_query(sql)
+
+
+def get_process_delays_by_stage(filters: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    """
+    Evaluation delays and mean assessment score by stage.
+    Powers 'Process Delays by Stage' and 'Stage Evaluation Scores' visuals.
+    """
+    filters = filters or {}
+    where_clause = _build_where_clause(
+        company_ids=filters.get("company_ids"),
+        sectors=filters.get("sectors"),
+        date_range=filters.get("date_range"),
+        table_alias="a"
+    )
+
+    sql = f"""
+    SELECT 
+        sr.sequence_order,
+        sr.stage_name,
+        COUNT(CASE WHEN sr.sla_breached_flag = TRUE THEN 1 END) AS delayed_records,
+        ROUND(AVG(sr.evaluation_score)::NUMERIC, 1) AS avg_score,
+        ROUND(AVG(CASE WHEN sr.sla_breached_flag = TRUE 
+            THEN date_diff('hour', sr.stage_entry_time, sr.stage_exit_time) END)::NUMERIC, 1) AS avg_delay_hours
+    FROM recruitment_stage_records sr
+    JOIN applications a ON sr.application_id = a.application_id
+    JOIN companies c ON a.company_id = c.company_id
+    {where_clause}
+    GROUP BY sr.sequence_order, sr.stage_name
+    ORDER BY sr.sequence_order ASC;
+    """
+    return run_query(sql)
+
+
+def get_company_analytics_kpis(filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    KPI cards for Page 3 (Company Analytics):
+    Participating Companies, Offers Released, Students Hired, Offer Acceptance Rate %.
+    """
+    filters = filters or {}
+    company_ids = filters.get("company_ids")
+    sectors = filters.get("sectors")
+    date_range = filters.get("date_range")
+
+    conditions = []
+    if company_ids:
+        ids_str = ", ".join(f"'{cid}'" if isinstance(cid, str) else str(cid) for cid in company_ids)
+        conditions.append(f"c.company_id IN ({ids_str})")
+    if sectors:
+        sec_str = ", ".join("'" + s.replace("'", "''") + "'" for s in sectors)
+        conditions.append(f"c.industry_sector IN ({sec_str})")
+    if date_range and len(date_range) == 2 and date_range[0] and date_range[1]:
+        conditions.append(f"a.application_date BETWEEN '{date_range[0]}' AND '{date_range[1]}'")
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    sql = f"""
+    SELECT 
+        COUNT(DISTINCT c.company_id) AS participating_companies,
+        COUNT(DISTINCT CASE WHEN sr.stage_name = 'Offer Extended' THEN sr.application_id END) AS offers_released,
+        COUNT(DISTINCT CASE WHEN a.overall_status = 'Hired' THEN a.application_id END) AS students_hired,
+        ROUND(
+            (COUNT(DISTINCT CASE WHEN a.overall_status = 'Hired' THEN a.application_id END)::NUMERIC / 
+            NULLIF(COUNT(DISTINCT CASE WHEN sr.stage_name = 'Offer Extended' THEN sr.application_id END), 0)) * 100, 1
+        ) AS offer_acceptance_rate_pct,
+        COUNT(DISTINCT a.application_id) AS total_applications
+    FROM companies c
+    LEFT JOIN applications a ON c.company_id = a.company_id
+    LEFT JOIN recruitment_stage_records sr ON a.application_id = sr.application_id
+    {where_clause};
+    """
+    df = run_query(sql)
+    if not df.empty:
+        return df.iloc[0].to_dict()
+    return {
+        "participating_companies": 0,
+        "offers_released": 0,
+        "students_hired": 0,
+        "offer_acceptance_rate_pct": 0.0,
+        "total_applications": 0,
+    }
+
+
+def get_top_companies_by_offers(filters: Optional[Dict[str, Any]] = None, limit: int = 10) -> pd.DataFrame:
+    """Top companies by total offers extended (Page 3 visual)."""
+    filters = filters or {}
+    where_clause = _build_where_clause(
+        company_ids=filters.get("company_ids"),
+        sectors=filters.get("sectors"),
+        date_range=filters.get("date_range"),
+        table_alias="a"
+    )
+    extra_offer = "AND sr.stage_name = 'Offer Extended'" if where_clause else "WHERE sr.stage_name = 'Offer Extended'"
+
+    sql = f"""
+    SELECT 
+        c.company_name,
+        COUNT(DISTINCT sr.application_id) AS total_offers
+    FROM recruitment_stage_records sr
+    JOIN applications a ON sr.application_id = a.application_id
+    JOIN companies c ON a.company_id = c.company_id
+    {where_clause} {extra_offer}
+    GROUP BY c.company_name
+    ORDER BY total_offers DESC
+    LIMIT {limit};
+    """
+    return run_query(sql)
+
+
+def get_operations_resource_kpis() -> Dict[str, Any]:
+    """KPI metrics for Page 4 (Placement Operations & Resource Planning)."""
+    sql = """
+    SELECT 
+        (SELECT COUNT(*) FROM interview_slots) AS total_scheduled_interviews,
+        (SELECT COUNT(DISTINCT panel_id) FROM panels) AS total_panels,
+        (SELECT COUNT(DISTINCT room_id) FROM rooms) AS total_rooms,
+        ROUND(
+            (SELECT COUNT(*)::NUMERIC FROM interview_slots) / 
+            NULLIF((SELECT COUNT(DISTINCT panel_id) FROM panels), 0), 1
+        ) AS avg_slots_per_panel,
+        (SELECT COUNT(*) FROM recruitment_stage_records WHERE sla_breached_flag = TRUE) AS total_sla_breaches;
+    """
+    df = run_query(sql)
+    if not df.empty:
+        return df.iloc[0].to_dict()
+    return {
+        "total_scheduled_interviews": 0,
+        "total_panels": 0,
+        "total_rooms": 0,
+        "avg_slots_per_panel": 0.0,
+        "total_sla_breaches": 0,
+    }
+
+
+def get_interview_load_by_room(limit: int = 15) -> pd.DataFrame:
+    """Interview slot allocation by room (Page 4 visual)."""
+    sql = f"""
+    SELECT 
+        r.room_name,
+        r.room_id,
+        r.interview_mode,
+        COUNT(s.slot_id) AS slot_count
+    FROM rooms r
+    JOIN interview_slots s ON r.room_id = s.room_id
+    GROUP BY r.room_name, r.room_id, r.interview_mode
+    ORDER BY slot_count DESC
+    LIMIT {limit};
+    """
+    return run_query(sql)
+
+
+def get_interview_load_by_panel(limit: int = 15) -> pd.DataFrame:
+    """Interview slot allocation by interviewer panel (Page 4 visual)."""
+    sql = f"""
+    SELECT 
+        p.panel_code,
+        p.panel_id,
+        p.department,
+        COUNT(s.slot_id) AS slot_count
+    FROM panels p
+    JOIN interview_slots s ON p.panel_id = s.panel_id
+    GROUP BY p.panel_code, p.panel_id, p.department
+    ORDER BY slot_count DESC
+    LIMIT {limit};
     """
     return run_query(sql)
